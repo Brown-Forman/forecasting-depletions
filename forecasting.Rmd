@@ -1,0 +1,571 @@
+---
+title: "forecasting"
+author: "Thi Allgood"
+date: "9/11/2020"
+output: html_document
+---
+---
+title: "Forecasting"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r }
+library(odbc)
+library(tidyverse)
+library(odbc)
+library(forecast)
+library(RcppRoll)
+library(tsibble)
+library(tsibbledata)
+library(ggplot2)
+library(feasts)
+library(ggplot2)
+library(timetk)
+library(zoo)
+library(GGally)
+library(readxl)
+library(fpp2)
+library(fpp3)
+```
+
+
+
+```{r }
+con <- dbConnect(odbc::odbc(), "CLPImpala")
+depletions_df <- dbGetQuery(con, 
+           "SELECT brand_name,
+           t_date, 
+           sum(depl_9l) as 'depletions'
+           FROM dp_data_science.vwb_volumetric_depletions
+           WHERE mkt_lvl3 = 'United States'
+           AND brand_lvl1 = 'Active Brands'
+           AND value_type = '010'
+           GROUP BY t_date, brand_name
+           ORDER BY t_date") 
+
+#List of brands to be forecast
+```
+
+```{r}
+brand_list <- list("EL JIMADOR",
+                   "HERRADURA", 
+                   "JACK DANIELS TENNESS")
+brand = brand_list[[3]]
+```
+
+Brands
+```{r}
+depletions_df1 <- depletions_df %>%
+  group_by(brand_name, t_date) %>%
+  summarize(depletions = mean(depletions)) %>%
+  mutate(t_date = yearmonth(t_date)) %>%
+  filter(brand_name %in% brand_list)
+
+depletions_df1 <- depletions_df1 %>%
+  slice(1:(nrow(depletions_df1)-2))
+
+
+
+tsibble1 <- depletions_df1 %>%
+  as_tsibble(key=brand_name,index = t_date)
+
+```
+
+```{r}
+tsibble1 %>%
+  autoplot()
+
+tsibble1 %>%
+  tsibble::fill_gaps() %>%
+  gg_season(depletions,period = "year")
+```
+
+
+Brand: JACK DANIELS TENNESS
+```{r}
+brand_df <- depletions_df1 %>%
+  filter(brand_name == brand) %>%
+  mutate(t_date = yearmonth(t_date))
+
+brand_df <- brand_df %>%
+  slice(1:(nrow(brand_df)-2))
+
+tsibble <- brand_df %>%
+  as_tsibble(key=brand_name,index = t_date)
+
+tsibble %>%
+  autoplot() +
+  ylab("JACK DANIELS TENNESS") + xlab("Month")
+
+tsibble %>%
+  tsibble::fill_gaps() %>%
+  gg_season(depletions,period = "year") + 
+  ylab("JACK DANIELS TENNESS") + xlab("Month")
+
+tsibble %>%
+  gg_subseries(depletions) +
+  ylab("JACK DANIELS TENNESS")
+
+tsibble %>%
+  gg_lag(depletions, geom="point")
+
+tsibble %>%
+  autoplot()
+
+tsibble %>% ACF(depletions) %>%
+  autoplot()
+
+```
+
+
+```{r}
+dcmp <- tsibble %>%
+  model(STL(depletions))
+components(dcmp)
+```
+
+```{r}
+tsibble %>%
+  autoplot(depletions,color = "gray") +
+  autolayer(components(dcmp), trend, color = "red") + 
+  xlab("Month") + ylab("Depletions")
+```
+
+
+```{r}
+tsibble %>%
+  model(classical_decomposition(depletions,type = 'additive')) %>%
+  components() %>%
+  autoplot() + xlab("Month")
+```
+
+
+```{r}
+tsibble %>%
+  features(depletions,mean)
+
+tsibble %>%
+  features(depletions, quantile, prob=seq(0,1,by=0.25))
+
+tsibble %>%
+  features(depletions,feat_acf)
+
+tsibble %>%
+  features(depletions,feat_stl)
+
+tsibble %>%
+  features(depletions, feat_stl) %>%
+  ggplot(aes(x= trend_strength, y = seasonal_strength_year, col= brand_name)) +
+  geom_point()
+
+
+```
+
+# The forecaster's toolbox
+
+## Model: Time series linear model
+
+```{r}
+fit <- tsibble %>%
+  model(trend_model = TSLM(depletions ~ trend()))
+fit %>%
+  forecast(h = "3 years") %>%
+  autoplot(tsibble) 
+```
+
+## Model: average method
+
+```{r}
+fit2 <- tsibble %>%
+  model(MEAN(depletions)) 
+
+fit2 %>%
+  forecast(h = "3 years") %>%
+  autoplot(tsibble)
+```
+
+## Model: naive
+
+```{r}
+fit3 <- tsibble %>%
+  model(NAIVE(depletions)) 
+
+fit3 %>%
+  forecast(h = "3 years") %>%
+  autoplot(tsibble)
+```
+
+## Model: seasonal naive method
+
+```{r}
+fit4 <- tsibble %>%
+  model(SNAIVE(depletions)) 
+
+fit4 %>%
+  forecast(h = "3 years") %>%
+  autoplot(tsibble)
+```
+
+## Model: drift method
+
+```{r}
+fit5 <- tsibble %>%
+  model(RW(depletions ~ drift())) 
+
+fit5 %>%
+  forecast(h = "3 years") %>%
+  autoplot(tsibble)
+```
+
+# Residual diagnostics
+
+```{r}
+aug <- tsibble %>%
+  model(NAIVE(depletions)) %>%
+  augment()
+
+aug %>%
+  autoplot(.resid) +
+  xlab("Depletions") +
+  ggtitle("Residuals from naïve method")
+```
+
+
+```{r}
+aug %>%
+  ggplot(aes(x = .resid)) +
+  geom_histogram() +
+  ggtitle("Histogram of residuals")
+```
+
+```{r}
+aug %>%
+  ACF(.resid) %>%
+  autoplot() + 
+  ggtitle("ACF of residuals")
+
+```
+
+
+```{r}
+tsibble %>% model(NAIVE(depletions)) %>% gg_tsresiduals()
+```
+
+#  Evaluating forecast accuracy
+## Filter
+
+```{r}
+tsibble %>%
+  filter(year(t_date) >= 2019)
+tsibble %>%
+  filter(quarter(t_date) == 1)
+tsibble %>%
+  slice(n()-11:0)
+```
+
+```{r fig1, fig.height = 20, fig.width = 40}
+
+tsibble.train <- tsibble %>%
+  filter(year(t_date)<2019)
+
+fit6 <- tsibble.train %>%
+  model(
+    Mean = MEAN(depletions),
+    Naive = NAIVE(depletions),
+    Seasonal.naive = SNAIVE(depletions),
+    Drifts = RW(depletions ~ drift())
+  )
+
+tsibble.forecast <- fit6 %>%
+  forecast(h=19)
+
+tsibble.forecast %>%
+  autoplot(tsibble, level = NULL) 
+```
+
+```{r}
+accuracy(tsibble.forecast, tsibble)
+```
+## Time series cross-validation
+
+```{r}
+tsibble.tr <- tsibble %>%
+  slice(1:(n()-1)) %>%
+  stretch_tsibble(.init = 3, .step = 1)
+
+tsibble.forecast2 <- tsibble.tr %>%
+  model(RW(depletions ~ drift())) %>%
+  forecast(h=1)
+
+tsibble.forecast2 %>%
+  accuracy(tsibble)
+
+tsibble %>%
+  model(RW(depletions ~ drift())) %>%
+  accuracy()
+```
+
+
+
+```{r}
+tsibble.tr.12 <- tsibble %>%
+  slice(1:(n()-12)) %>%
+  stretch_tsibble(.init = 3, .step = 1)
+
+fit7 <- tsibble.tr.12 %>%
+  model(RW(depletions ~ drift())) %>%
+  forecast(h=12) %>%
+  group_by(.id) %>%
+  mutate(h=row_number()) %>%
+  ungroup()
+fit7 %>%
+  accuracy(tsibble,by="h") %>%
+  ggplot(aes(x=h,y=RMSE)) + geom_point()
+```
+
+# Simple exponential smoothing
+ 
+```{r}
+
+fit8 <- tsibble %>%
+  model(ETS(depletions ~ error("A") + trend("N") + season("N"), opt_crit = "mse"))
+fc <- fit8 %>%
+  forecast(h = 5)
+```
+
+```{r}
+fc %>%
+  autoplot(tsibble) +
+  geom_line(aes(y=.fitted, colour = "Fitted"), data=augment(fit8)) +
+  xlab("Month")
+```
+
+
+```{r}
+tsibble %>%
+  model(
+    `Holt's method` = ETS(depletions ~ error("A") + trend("A") + season("N")),
+    `Damped Holt's method` = ETS(depletions ~ error("A") + trend("Ad", phi = 0.9) + season("N"))
+  ) %>%
+  forecast(h=15) %>%
+  autoplot(tsibble,level = NULL) 
+
+
+```
+
+## Method with seasonality
+
+```{r}
+fit9 <- tsibble %>%
+  summarise(depletions = sum(depletions)) %>%
+  model(
+    additive = ETS(depletions ~ error("A") + trend("A") + season("A")),
+    multiplicative = ETS(depletions ~ error("M") + trend("A") + season("M"))
+  )
+
+forecast1 <- fit9 %>%
+  forecast(h="3 years")
+
+forecast1 %>%
+  autoplot(tsibble, level = NULL) + xlab("Month") +
+  scale_color_brewer(type = "qual", palette = "Dark2")
+
+```
+
+## Estimating ETS models
+
+```{r}
+fit10 <- tsibble %>%
+  summarise(depletions = sum(depletions)) %>%
+  model(ETS(depletions))
+
+report(fit10)
+```
+
+
+```{r}
+components(fit10) %>%
+  autoplot() +
+  ggtitle("ETS(M,N,M) components")
+```
+
+
+
+```{r}
+residuals(fit10) %>%
+  autoplot()
+residuals(fit10, type = "response") %>%
+  autoplot()
+```
+
+## Forecasting with ETS models
+
+
+
+```{r fig3, fig.height = 10, fig.width = 15 }
+fit10 %>%
+  forecast(h = 36) %>%
+  autoplot(tsibble)
+
+```
+
+# ARIMA
+## Seasonal differencing
+
+
+
+```{r }
+
+tsibble %>%
+  summarise(depletions = sum(depletions)) %>%
+  transmute(
+    depletions = depletions,
+    Log.depletion = log(depletions),
+    annual.change.in.log = difference(log(depletions), 12),
+    Doubly.difference.log = difference(difference(log(depletions), 12), 1)
+  ) %>%
+  gather("Type","depletions", !!!syms(measured_vars(.)), factor_key = T) %>%
+  ggplot(aes(x = t_date, y = depletions)) +
+  geom_line() + 
+  facet_grid(vars(Type), scale = "free_y")
+
+```
+
+## Non seasonal arima models
+```{r}
+arima.fit <- tsibble %>%
+  model(ARIMA(depletions ~ PDQ(0,0,0)))
+report(arima.fit)
+arima.fit %>%
+  forecast(h=24) %>%
+  autoplot(slice(tsibble, (n()-80):n()))
+
+
+```
+
+
+
+### Seasonality
+#### ACF 
+
+```{r}
+tsibble %>%
+  ACF(depletions) %>%
+  autoplot()
+```
+
+#### PACF
+
+```{r}
+#
+tsibble %>%
+  PACF(depletions) %>%
+  autoplot()
+
+```
+
+```{r}
+#
+fit11 <- tsibble %>%
+  model(ARIMA(depletions ~ pdq(1,0,0) + PDQ(0,0,0)))
+report(fit11)
+```
+
+### Seasonally adjusted ?
+
+```{r}
+tsibble.seasonally.adjusted <- tsibble %>%
+  model(STL(depletions ~ season(window = "periodic"))) %>%
+  components() %>%
+  select(-.model) %>%
+  as_tsibble()
+tsibble %>%
+  autoplot()
+tsibble.seasonally.adjusted %>%
+  autoplot(season_adjust)
+
+
+```
+
+```{r}
+tsibble.seasonally.adjusted %>%
+  gg_tsdisplay(difference(season_adjust), plot_type = 'partial')
+
+
+```
+
+
+```{r}
+# arima110
+fit110 <- tsibble.seasonally.adjusted %>%
+  model(
+    arima = ARIMA(season_adjust ~ pdq(1,1,0) + PDQ(0,0,0))
+  )
+report(fit110)
+
+```
+
+```{r}
+# arima411
+fit.arima <- tsibble.seasonally.adjusted %>%
+  model(
+    arima = ARIMA(season_adjust)
+  )
+report(fit.arima)
+
+
+```
+
+```{r}
+#
+fit.arima %>%
+   gg_tsresiduals()
+
+```
+
+```{r}
+#
+fit.arima %>% forecast() %>% autoplot(tsibble.seasonally.adjusted)
+
+
+```
+
+
+```{r}
+gg_arma(fit.arima)
+
+
+```
+##  Seasonal ARIMA models
+
+```{r}
+#
+tsibble %>% 
+  gg_tsdisplay(depletions %>% difference(12) %>% difference(), plot_type='partial') 
+
+```
+
+
+```{r}
+#
+
+
+```
+
+```{r}
+#
+
+
+```
+
+```{r}
+#
+
+
+```
+
